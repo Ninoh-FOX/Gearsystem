@@ -72,6 +72,7 @@ Video::Video(Memory* pMemory, Processor* pProcessor, Cartridge* pCartridge)
     m_bDisplayEnabled = false;
     m_bSpriteOvrRequest = false;
     m_bNoSpriteLimit = false;
+    m_bHeadless = false;
     m_bLineInterruptPending = false;
     m_bSpriteCollisionRequest = false;
     m_iSpriteCollisionX = 0;
@@ -274,6 +275,13 @@ void Video::LogMissedVBlank()
     e.vdp.hpos = (u16)m_iCycleCounter;
     m_pTraceLogger->TraceLog(e);
 #endif
+}
+
+// No picture: only what the game can see is kept (sprite overflow and
+// collision flags). For a machine whose screen is never shown.
+void Video::SetHeadless(bool headless)
+{
+    m_bHeadless = headless;
 }
 
 void Video::SetNoSpriteLimit(bool noSpriteLimit)
@@ -937,7 +945,7 @@ void Video::RenderBackgroundSMSGG(int line)
     bool lock_right = IsSetBit(m_VdpRegister[0], 7);
     bool render_line = !game_gear || ((line >= y_offset) && (line < (y_offset + GS_RESOLUTION_GG_HEIGHT)));
 
-    if (line >= max_height)
+    if ((line >= max_height) || m_bHeadless)
     {
         for (int scx = scx_begin; scx < scx_end; scx++)
             m_pInfoBuffer[line_width_info + scx - scx_begin] = 0;
@@ -1168,7 +1176,10 @@ void Video::RenderSpritesSMSGG(int line)
 
             palette_color += 16;
 
-            if (m_bGameGear && !m_bGameGearSMSMode)
+            if (m_bHeadless)
+            {
+            }
+            else if (m_bGameGear && !m_bGameGearSMSMode)
             {
                 if ((line >= y_offset) && (line < (y_offset + GS_RESOLUTION_GG_HEIGHT)))
                     m_pFrameBuffer[pixel_screen] = CachedColorFromPalette(palette_color);

@@ -22,6 +22,7 @@
 
 #include "../../src/GearsystemCore.h"
 #include "libretro.h"
+#include <vector>
 
 #define GEARSYSTEM_LINK_SUBSYSTEM 0x101
 #define GEARSYSTEM_LINK_RAM_1 ((1 << 8) | RETRO_MEMORY_SAVE_RAM)
@@ -51,6 +52,13 @@ public:
     void SetSavePath(const char* content_path, const char* save_directory);
     void PersistentMemory(bool write, const retro_vfs_interface* vfs);
     bool PersistentMemory(const char* path, unsigned id, bool write, const retro_vfs_interface* vfs);
+
+    // Dual link (libretro_dual.cpp): the machine on the other end of the
+    // cable is a copy of the other console's one, which is never seen.
+    void SetFirst(unsigned index);
+    void SetHeadless(unsigned index, bool headless);
+    static bool SaveMachine(GearsystemCore* core, std::vector<u8>& data);
+    static bool LoadMachine(GearsystemCore* core, const u8* data, size_t size);
 
 private:
     // The scheduler keeps peers within one CPU step of each other.
@@ -91,6 +99,8 @@ private:
     u32 m_rom_hash[2];
     u32 m_bootrom_hash[2];
     bool m_has_rom_identity;
+    unsigned m_first;
+    bool m_headless[2];
 };
 
 #endif /* LIBRETRO_LINK_H */

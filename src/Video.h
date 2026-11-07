@@ -94,6 +94,7 @@ public:
     Overscan GetOverscan();
     void SetHideLeftBar(HideLeftBar hideLeftBar);
     void SetNoSpriteLimit(bool noSpriteLimit);
+    void SetHeadless(bool headless);
     int GetHideLeftBarOffset();
     void SetPhaserCoordinates(int x, int y);
     bool IsPhaserDetected();
@@ -202,6 +203,7 @@ private:
     bool m_bDisplayEnabled;
     bool m_bSpriteOvrRequest;
     bool m_bNoSpriteLimit;
+    bool m_bHeadless;
     bool m_bLineInterruptPending;
     bool m_bSpriteCollisionRequest;
     int m_iSpriteCollisionX;

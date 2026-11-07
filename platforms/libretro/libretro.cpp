@@ -31,6 +31,7 @@
 #include "../../src/gearsystem.h"
 #include "libretro_core_options.h"
 #include "libretro_link.h"
+#include "libretro_dual.h"
 
 #ifdef _WIN32
 static const char slash = '\\';
@@ -67,6 +68,14 @@ static int link_screen = 0;
 static int link_audio = 0;
 static bool link_subsystem = false;
 static bool game_loaded = false;
+
+// Dual link (libretro_dual.cpp): both Game Gears of a netplay session on
+// each console. Instance 0 is the player's, instance 1 the other console's.
+static bool dual_enabled = false;       // Core option, read at load
+static bool dual_linked = false;        // Both Game Gears on the cable now
+static unsigned dual_my_slot = 0;
+static bool dual_options_pending = false;
+static Cartridge::ForceConfiguration dual_config;
 
 static unsigned input_device[2] = {
     RETRO_DEVICE_SMS_GG_PAD,
@@ -108,6 +117,7 @@ static void release_controller_input(unsigned port);
 static void update_input(void);
 static void check_variables(void);
 static void set_memory_maps(void);
+static void dual_register(void);
 
 static void set_cheat(GearsystemCore* target, const std::string& code)
 {
@@ -150,6 +160,10 @@ static void set_cheat(GearsystemCore* target, const std::string& code)
 
 static void apply_cheats(void)
 {
+    // (The copy of this Game Gear on the other console has none.)
+    if (dual_active())
+        return;
+
     for (unsigned i = 0; i < instance_count; i++)
     {
         instances[i].core->ClearCheats();
@@ -293,6 +307,7 @@ static void init_instances(unsigned count)
 void retro_deinit(void)
 {
     retro_unload_game();
+    dual_shutdown();
     vfs_interface = NULL;
 
     current_screen_width = 0;
@@ -309,6 +324,13 @@ void retro_reset(void)
 {
     if (!game_loaded)
         return;
+
+    // Both consoles restart both Game Gears in the same frame.
+    if (dual_active())
+    {
+        dual_request_reset();
+        return;
+    }
 
     log_cb(RETRO_LOG_DEBUG, "Resetting...\n");
     check_variables();
@@ -381,16 +403,73 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 
     unsigned width = runtime_info.screen_width;
     unsigned height = runtime_info.screen_height;
-    if (link_cable)
+    bool two_screens = link_cable && !dual_linked;
+    if (two_screens)
         link_cable->Geometry(link_vertical, link_screen, &width, &height);
 
     info->geometry.base_width   = width;
     info->geometry.base_height  = height;
     info->geometry.max_width    = GS_RESOLUTION_MAX_WIDTH_WITH_OVERSCAN;
     info->geometry.max_height   = GS_RESOLUTION_MAX_HEIGHT_WITH_OVERSCAN;
-    info->geometry.aspect_ratio = link_cable ? (float)width / height : aspect_ratio;
+    info->geometry.aspect_ratio = two_screens ? (float)width / height : aspect_ratio;
     info->timing.fps            = runtime_info.fps;
     info->timing.sample_rate    = 44100.0;
+}
+
+// A frame that does not run (the dual link waits): the same picture again,
+// and silence.
+static void dual_idle_frame(void)
+{
+    static s16 silence[2 * 1024];
+    struct retro_system_av_info info;
+    retro_get_system_av_info(&info);
+    unsigned frames = (unsigned)(info.timing.sample_rate / info.timing.fps + 0.5);
+
+    video_cb(NULL, current_screen_width, current_screen_height, current_screen_width * sizeof(u16));
+    audio_batch_cb(silence, MIN(frames, (unsigned)(sizeof(silence) / sizeof(silence[0]) / 2)));
+}
+
+// The player's buttons, as they travel to the other console.
+static uint32_t dual_local_keys(void)
+{
+    int16_t ib = 0;
+
+    if (input_device[0] == RETRO_DEVICE_NONE)
+        return 0;
+
+    if (libretro_supports_bitmasks)
+        ib = input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_MASK);
+    else
+    {
+        for (unsigned i = 0; i <= RETRO_DEVICE_ID_JOYPAD_R3; i++)
+            ib |= input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, i) ? (1 << i) : 0;
+    }
+
+    uint32_t keys = 0;
+    if (ib & (1 << RETRO_DEVICE_ID_JOYPAD_UP))
+        keys |= DUAL_KEY_UP;
+    if (ib & (1 << RETRO_DEVICE_ID_JOYPAD_DOWN))
+        keys |= DUAL_KEY_DOWN;
+    if (ib & (1 << RETRO_DEVICE_ID_JOYPAD_LEFT))
+        keys |= DUAL_KEY_LEFT;
+    if (ib & (1 << RETRO_DEVICE_ID_JOYPAD_RIGHT))
+        keys |= DUAL_KEY_RIGHT;
+    if (ib & (1 << RETRO_DEVICE_ID_JOYPAD_B))
+        keys |= DUAL_KEY_1;
+    if (ib & (1 << RETRO_DEVICE_ID_JOYPAD_A))
+        keys |= DUAL_KEY_2;
+    if (ib & (1 << RETRO_DEVICE_ID_JOYPAD_START))
+        keys |= DUAL_KEY_START;
+
+    if (!allow_up_down)
+    {
+        if ((keys & (DUAL_KEY_UP | DUAL_KEY_DOWN)) == (DUAL_KEY_UP | DUAL_KEY_DOWN))
+            keys &= ~DUAL_KEY_DOWN;
+        if ((keys & (DUAL_KEY_LEFT | DUAL_KEY_RIGHT)) == (DUAL_KEY_LEFT | DUAL_KEY_RIGHT))
+            keys &= ~DUAL_KEY_RIGHT;
+    }
+
+    return keys;
 }
 
 void retro_run(void)
@@ -400,16 +479,46 @@ void retro_run(void)
 
     bool core_options_updated = false;
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &core_options_updated) && core_options_updated)
+        dual_options_pending = true;
+
+    // While the dual link lasts the settings wait: the copy of this Game
+    // Gear on the other console could not follow them.
+    if (dual_options_pending && !dual_active())
+    {
+        dual_options_pending = false;
         check_variables();
+    }
 
-    update_input();
-    for (unsigned i = 0; i < instance_count; i++)
-        instances[i].sample_count = 0;
+    if (dual_setting_up())
+    {
+        dual_idle_frame();
+        return;
+    }
 
-    if (link_cable)
+    if (dual_running())
+    {
+        input_poll_cb();
+        if (dual_frame_begin(dual_local_keys()) != DUAL_FRAME_RUN || !dual_linked)
+        {
+            dual_idle_frame();
+            return;
+        }
+        for (unsigned i = 0; i < instance_count; i++)
+            instances[i].sample_count = 0;
         link_cable->RunFrame();
+        dual_frame_end();
+    }
     else
-        core->RunToVBlank((u8*)instances[0].frame_buffer, instances[0].audio_buffer, &instances[0].sample_count);
+    {
+        update_input();
+        for (unsigned i = 0; i < instance_count; i++)
+            instances[i].sample_count = 0;
+
+        if (link_cable)
+            link_cable->RunFrame();
+        else
+            core->RunToVBlank((u8*)instances[0].frame_buffer, instances[0].audio_buffer, &instances[0].sample_count);
+    }
 
     struct retro_system_av_info info;
     retro_get_system_av_info(&info);
@@ -426,7 +535,7 @@ void retro_run(void)
     const u16* video = instances[0].frame_buffer;
     const s16* audio = instances[0].audio_buffer;
     int samples = instances[0].sample_count;
-    if (link_cable)
+    if (link_cable && !dual_linked)
     {
         video = link_cable->Video(link_vertical, link_switched, link_screen);
         audio = link_cable->Audio(link_audio, &samples);
@@ -566,6 +675,9 @@ static bool load_game(const struct retro_game_info* info, const struct retro_gam
     bool achievements = !link_cable;
     environ_cb(RETRO_ENVIRONMENT_SET_SUPPORT_ACHIEVEMENTS, &achievements);
 
+    if (!link_cable && dual_enabled && core->IsNativeGameGearMode())
+        dual_register();
+
     Cartridge* cart = core->GetCartridge();
 
     log_cb(RETRO_LOG_INFO, "CRC: %08X\n", cart->GetCRC());
@@ -589,6 +701,9 @@ static bool load_game(const struct retro_game_info* info, const struct retro_gam
 
 void retro_unload_game(void)
 {
+    // Back to the player's Game Gear alone first: its save is the one kept.
+    dual_shutdown();
+
     if (game_loaded && link_cable && !link_subsystem)
         link_cable->PersistentMemory(true, vfs_interface);
 
@@ -627,7 +742,7 @@ size_t retro_serialize_size(void)
 {
     if (!game_loaded)
         return 0;
-    if (link_cable)
+    if (link_cable && !dual_linked)
         return link_cable->StateSize();
 
     size_t size = 0;
@@ -639,12 +754,15 @@ bool retro_serialize(void* data, size_t size)
 {
     if (!game_loaded || !data)
         return false;
-    return link_cable ? link_cable->SaveState(data, size) : core->SaveState((u8*)data, size);
+    return (link_cable && !dual_linked) ? link_cable->SaveState(data, size) : core->SaveState((u8*)data, size);
 }
 
 bool retro_unserialize(const void* data, size_t size)
 {
     if (!game_loaded)
+        return false;
+    // The copy of this Game Gear on the other console cannot travel in time.
+    if (dual_active())
         return false;
     return link_cable ? link_cable->LoadState(data, size) : core->LoadState((const u8*)data, size);
 }
@@ -867,7 +985,7 @@ static void set_controller_info(void)
         { port_2, 3 },
         { NULL, 0 },
     };
-    environ_cb(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, (void*)(link_cable ? linked_ports : ports));
+    environ_cb(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, (void*)((link_cable && !dual_linked) ? linked_ports : ports));
 
     struct retro_input_descriptor joypad[] = {
         { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,   "Left" },
@@ -911,7 +1029,7 @@ static void apply_controller_device(unsigned port, unsigned device, bool log_dev
     if (!core)
         return;
 
-    if (link_cable)
+    if (link_cable && !dual_linked)
     {
         GearsystemCore* target = instances[port].core;
         target->EnablePhaser(false);
@@ -968,8 +1086,11 @@ static void apply_controller_device(unsigned port, unsigned device, bool log_dev
 
 static void release_controller_input(unsigned port)
 {
-    GearsystemCore* target = link_cable ? instances[port].core : core;
-    GS_Joypads joypad = link_cable ? Joypad_1 : (GS_Joypads)port;
+    // (With the dual link, the other Game Gear's buttons only come from the
+    // network.)
+    bool linked_ports = link_cable && !dual_linked;
+    GearsystemCore* target = linked_ports ? instances[port].core : core;
+    GS_Joypads joypad = linked_ports ? Joypad_1 : (GS_Joypads)port;
 
     if (target)
     {
@@ -1621,6 +1742,10 @@ static void check_variables(void)
     var.value = NULL;
     link_enabled = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && strcmp(var.value, "Enabled") == 0;
 
+    var.key = "gearsystem_dual_link";
+    var.value = NULL;
+    dual_enabled = !(environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && strcmp(var.value, "Disabled") == 0);
+
     var.key = "gearsystem_link_placement";
     var.value = NULL;
     link_vertical = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && strcmp(var.value, "Vertical") == 0;
@@ -1659,4 +1784,231 @@ static void check_variables(void)
 
     for (unsigned i = 0; i < instance_count; i++)
         apply_variables(instances[i].core);
+}
+
+/* ---- Dual link ------------------------------------------------------------ */
+
+static u32 dual_fnv(u32 hash, const void* data, size_t size)
+{
+    const u8* p = (const u8*)data;
+    while (size--)
+        hash = (hash ^ *p++) * 16777619u;
+    return hash;
+}
+
+static u32 dual_fnv32(u32 hash, u32 value)
+{
+    return dual_fnv(hash, &value, sizeof(value));
+}
+
+// Everything that makes this Game Gear another machine: both consoles must
+// have the same (worked out again for each netplay session).
+static u32 dual_machine_cfg(void)
+{
+    u32 cfg = 2166136261u;
+    cfg = dual_fnv32(cfg, (u32)config.system);
+    cfg = dual_fnv32(cfg, (u32)config.zone);
+    cfg = dual_fnv32(cfg, (u32)config.type);
+    cfg = dual_fnv32(cfg, (u32)config.region);
+    cfg = dual_fnv32(cfg, bootrom_gg ? 1 : 0);
+    if (bootrom_gg && core && core->GetMemory()->IsBootromLoaded(true))
+        cfg = dual_fnv(cfg, core->GetMemory()->GetBootrom(), core->GetMemory()->GetBootromSize());
+    // (The sprite limit decides when the sprite overflow flag is set.)
+    struct retro_variable var = { "gearsystem_no_sprite_limit", NULL };
+    bool no_sprite_limit = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && strcmp(var.value, "Enabled") == 0;
+    cfg = dual_fnv32(cfg, no_sprite_limit ? 1 : 0);
+    return cfg;
+}
+
+static GearsystemCore* dual_core(unsigned slot)
+{
+    return instances[slot == dual_my_slot ? 0 : 1].core;
+}
+
+// A Game Gear starts over, keeping its save (even before the game enabled
+// the cartridge RAM).
+static void dual_restart(GearsystemCore* target)
+{
+    MemoryRule* rule = target->GetMemory()->GetCurrentRule();
+    std::stringstream ram;
+    rule->SaveRam(ram);
+    s32 size = (s32)ram.tellp();
+    target->ResetROM(&dual_config);
+    rule = target->GetMemory()->GetCurrentRule();
+    if (size > 0)
+        rule->LoadRam(ram, size);
+}
+
+static bool dual_hook_capture(std::vector<uint8_t>& blob)
+{
+    // The settings this session started with, for every restart while it
+    // lasts (the menu cannot change them meanwhile).
+    dual_config = config;
+    for (unsigned i = 0; i < instance_count; i++)
+        instances[i].core->ClearCheats();
+    release_controller_input(0);
+    release_controller_input(1);
+    load_bootroms(core);
+    dual_restart(core);
+    memset(instances[0].frame_buffer, 0, sizeof(instances[0].frame_buffer));
+    instances[0].sample_count = 0;
+    return LibretroLink::SaveMachine(core, blob);
+}
+
+static bool dual_hook_link(unsigned my_slot, const uint8_t* own, size_t own_size,
+                           const uint8_t* peer, size_t peer_size)
+{
+    Cartridge* cart = core->GetCartridge();
+    std::vector<u8> rom(cart->GetROM(), cart->GetROM() + cart->GetROMSize());
+
+    init_instances(2);
+    apply_variables(instances[1].core);
+    load_bootroms(instances[1].core);
+    if (!instances[1].core->LoadROMFromBuffer(&rom[0], (int)rom.size(), &dual_config, retro_game_path) ||
+        !LibretroLink::LoadMachine(instances[0].core, own, own_size) ||
+        !LibretroLink::LoadMachine(instances[1].core, peer, peer_size))
+    {
+        SafeDelete(instances[1].core);
+        instance_count = 1;
+        core = instances[0].core;
+        return false;
+    }
+
+    dual_my_slot = my_slot;
+    link_cable = new LibretroLink(instances, dpad_vertical_latch, dpad_horizontal_latch);
+    // Slot 0 first, on both consoles: the same machines, in the same order.
+    link_cable->SetFirst(my_slot == 0 ? 0 : 1);
+    link_cable->SetHeadless(1, true);
+    link_cable->Reset();
+    dual_linked = true;
+    for (unsigned i = 0; i < 2; i++)
+        instances[i].sample_count = 0;
+    log_cb(RETRO_LOG_INFO, "Gear-to-Gear dual link: this Game Gear is slot %u\n", my_slot);
+    return true;
+}
+
+static void dual_hook_unlink(void)
+{
+    if (!dual_linked)
+        return;
+    SafeDelete(link_cable);
+    SafeDelete(instances[1].core);
+    instance_count = 1;
+    core = instances[0].core;
+    dual_linked = false;
+    // The player's Game Gear goes on alone, unplugged.
+    release_controller_input(0);
+    apply_cheats();
+    log_cb(RETRO_LOG_INFO, "Gear-to-Gear dual link ended\n");
+}
+
+static void dual_hook_set_keys(unsigned slot, uint32_t keys)
+{
+    static const struct { uint32_t bit; GS_Keys key; } map[] = {
+        { DUAL_KEY_UP, Key_Up }, { DUAL_KEY_DOWN, Key_Down },
+        { DUAL_KEY_LEFT, Key_Left }, { DUAL_KEY_RIGHT, Key_Right },
+        { DUAL_KEY_1, Key_1 }, { DUAL_KEY_2, Key_2 }, { DUAL_KEY_START, Key_Start },
+    };
+    GearsystemCore* target = dual_core(slot);
+
+    for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+    {
+        if (keys & map[i].bit)
+            target->KeyPressed(Joypad_1, map[i].key);
+        else
+            target->KeyReleased(Joypad_1, map[i].key);
+    }
+}
+
+static void dual_hook_reset_all(void)
+{
+    // Slot order, on both consoles.
+    for (unsigned slot = 0; slot < 2; slot++)
+        dual_restart(dual_core(slot));
+    link_cable->Reset();
+}
+
+// What the game of a slot can see: memory, cartridge RAM, VDP and CPU.
+static uint32_t dual_hook_hash(unsigned slot)
+{
+    GearsystemCore* target = dual_core(slot);
+    MemoryRule* rule = target->GetMemory()->GetCurrentRule();
+    Video* video = target->GetVideo();
+    Processor::ProcessorState* cpu = target->GetProcessor()->GetState();
+    u32 hash = 2166136261u;
+
+    hash = dual_fnv(hash, target->GetMemory()->GetMemoryMap() + 0xC000, 0x2000);
+    if (rule->GetRamBanks() && rule->GetRamSize())
+        hash = dual_fnv(hash, rule->GetRamBanks(), rule->GetRamSize());
+    hash = dual_fnv(hash, video->GetVRAM(), 0x4000);
+    hash = dual_fnv(hash, video->GetCRAM(), 0x40);
+    hash = dual_fnv(hash, video->GetRegisters(), 16);
+    hash = dual_fnv32(hash, video->GetStatusFlagsDebug());
+    SixteenBitRegister* regs[] = { cpu->AF, cpu->BC, cpu->DE, cpu->HL, cpu->IX, cpu->IY, cpu->SP, cpu->PC };
+    for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); i++)
+        hash = dual_fnv32(hash, regs[i]->GetValue());
+    return hash;
+}
+
+static void dual_hook_message(const char* text, unsigned ms)
+{
+    struct retro_message msg = { text, (unsigned)(ms * 60 / 1000) };
+    environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
+}
+
+static void RETRO_CALLCONV netpacket_start(uint16_t client_id, retro_netpacket_send_t send_fn,
+                                           retro_netpacket_poll_receive_t poll_receive_fn)
+{
+    dual_set_cfg(dual_machine_cfg());
+    dual_net_start(client_id, send_fn, poll_receive_fn);
+}
+
+static void RETRO_CALLCONV netpacket_receive(const void* buf, size_t len, uint16_t client_id)
+{
+    dual_net_receive(buf, len, client_id);
+}
+
+static void RETRO_CALLCONV netpacket_stop(void)
+{
+    dual_net_stop();
+}
+
+static bool RETRO_CALLCONV netpacket_connected(uint16_t client_id)
+{
+    return dual_net_connected(client_id);
+}
+
+static void RETRO_CALLCONV netpacket_disconnected(uint16_t client_id)
+{
+    dual_net_disconnected(client_id);
+}
+
+// Netplay with this game is the dual link: only the buttons travel.
+static void dual_register(void)
+{
+    static const struct retro_netpacket_callback netpacket_iface = {
+        netpacket_start,
+        netpacket_receive,
+        netpacket_stop,
+        NULL,
+        netpacket_connected,
+        netpacket_disconnected,
+        "gearsystem-dual-" GS_VERSION,
+    };
+    static const struct dual_hooks hooks = {
+        dual_hook_capture,
+        dual_hook_link,
+        dual_hook_unlink,
+        dual_hook_set_keys,
+        dual_hook_reset_all,
+        dual_hook_hash,
+        dual_hook_message,
+    };
+    struct retro_system_av_info av_info;
+
+    dual_set_hooks(&hooks);
+    retro_get_system_av_info(&av_info);
+    dual_game_loaded(core->GetCartridge()->GetCRC(), dual_machine_cfg(), av_info.timing.fps);
+    if (environ_cb(RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE, (void*)&netpacket_iface))
+        log_cb(RETRO_LOG_INFO, "Gear-to-Gear dual link ready for netplay\n");
 }

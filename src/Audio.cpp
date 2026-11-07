@@ -38,6 +38,7 @@ Audio::Audio(Cartridge * pCartridge)
     m_bYM2413ForceDisabled = false;
     m_bYM2413CartridgeNotSupported = false;
     m_bMute = false;
+    m_bHeadless = false;
     m_master_volume = 1.0f;
     m_psg_volume = 1.0f;
     m_fm_volume = 1.0f;
@@ -175,6 +176,13 @@ void Audio::Mute(bool bMute)
     m_bMute = bMute;
 }
 
+// No sound at all: the PSG is write only, the game never reads it back.
+// For a machine that is never heard.
+void Audio::SetHeadless(bool headless)
+{
+    m_bHeadless = headless;
+}
+
 bool Audio::IsYM2413OutputEnabled() const
 {
     return m_bYM2413Enabled && !m_bYM2413ForceDisabled && !m_bYM2413CartridgeNotSupported;
@@ -194,6 +202,14 @@ void Audio::SyncYM2413State()
 
 void Audio::EndFrame(s16* pSampleBuffer, int* pSampleCount)
 {
+    if (m_bHeadless)
+    {
+        m_ElapsedCycles = 0;
+        if (IsValidPointer(pSampleCount))
+            *pSampleCount = 0;
+        return;
+    }
+
     m_pApu->end_frame(m_ElapsedCycles);
     m_pBuffer->end_frame(m_ElapsedCycles);
 

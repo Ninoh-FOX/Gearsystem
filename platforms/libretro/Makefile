@@ -278,6 +278,16 @@ else ifeq ($(platform), miyoo)
 	SHARED := -shared -Wl,-version-script=$(CORE_DIR)/link.T
 	PLATFORM_DEFINES := -DCC_RESAMPLER -DCC_RESAMPLER_NO_HIGHPASS
 	PLATFORM_FLAGS += -fomit-frame-pointer -ffast-math -march=armv5te -mtune=arm926ej-s
+# MIYOO MINI (Onion OS / MiniUI)
+else ifeq ($(platform), miyoomini)
+	TARGET := $(TARGET_NAME)_libretro.so
+	CC = /opt/miyoomini-toolchain/usr/bin/arm-linux-gcc
+	CXX = /opt/miyoomini-toolchain/usr/bin/arm-linux-g++
+	AR = /opt/miyoomini-toolchain/usr/bin/arm-linux-ar
+	fpic := -fPIC
+	SHARED := -shared -Wl,-version-script=$(CORE_DIR)/link.T -Wl,--no-undefined
+	PLATFORM_FLAGS += -fomit-frame-pointer -ffunction-sections -fdata-sections -Wl,--gc-sections
+	PLATFORM_FLAGS += -marm -mtune=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=hard
 # PS2
 else ifeq ($(platform), ps2)
 	TARGET := $(TARGET_NAME)_libretro_$(platform).a

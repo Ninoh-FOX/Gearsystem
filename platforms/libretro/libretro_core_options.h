@@ -558,6 +558,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "Disabled"
     },
     {
+        "gearsystem_dual_link",
+        "Netplay Gear-to-Gear Dual Link (restart)",
+        NULL,
+        "In a netplay session, run both Game Gears on each console (yours and a copy of the other player's), joined by the link cable in memory: only the buttons travel over the network. Each player keeps their own ROM and save. Both consoles need the same game and settings. With this enabled, netplay with Game Gear games always uses the link (2 players).",
+        NULL,
+        "link",
+        {
+            { "Enabled", NULL },
+            { "Disabled", NULL },
+            { NULL, NULL },
+        },
+        "Enabled"
+    },
+    {
         "gearsystem_link_placement",
         "Dual Screen Placement",
         NULL,

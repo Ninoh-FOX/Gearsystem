@@ -37,6 +37,7 @@ public:
     void Init();
     void Reset(bool bPAL);
     void Mute(bool bMute);
+    void SetHeadless(bool headless);
     void SetMasterVolume(float volume);
     void SetPSGVolume(float volume);
     void SetFMVolume(float volume);
@@ -84,6 +85,7 @@ private:
     Cartridge* m_pCartridge;
     s16* m_pYM2413Buffer;
     bool m_bMute;
+    bool m_bHeadless;
     float m_master_volume;
     float m_psg_volume;
     float m_fm_volume;
@@ -99,6 +101,8 @@ private:
 inline void Audio::Tick(unsigned int clockCycles)
 {
     m_ElapsedCycles += clockCycles;
+    if (m_bHeadless)
+        return;
     m_pYM2413->Tick(clockCycles);
 #ifndef GS_DISABLE_VGMRECORDER
     if (m_bVgmRecordingEnabled)
@@ -108,6 +112,8 @@ inline void Audio::Tick(unsigned int clockCycles)
 
 inline void Audio::WriteAudioRegister(u8 value)
 {
+    if (m_bHeadless)
+        return;
     m_pApu->write_data(m_ElapsedCycles, value);
     TracePSGEvent(value);
 #ifndef GS_DISABLE_VGMRECORDER
@@ -118,6 +124,8 @@ inline void Audio::WriteAudioRegister(u8 value)
 
 inline void Audio::WriteGGStereoRegister(u8 value)
 {
+    if (m_bHeadless)
+        return;
     m_pApu->write_ggstereo(m_ElapsedCycles, value);
     TracePSGStereoEvent(value);
 #ifndef GS_DISABLE_VGMRECORDER

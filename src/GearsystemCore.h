@@ -125,6 +125,7 @@ public:
     Video* GetVideo();
     Input* GetInput();
     void SetGlassesConfig(GlassesConfig config);
+    void SetHeadless(bool headless);
     u64 GetMasterClockCycles();
     void SetMasterClockCycles(u64 cycles);
     void SetLinkCableCallbacks(GS_LinkCable_Publish_Callback publish_callback,

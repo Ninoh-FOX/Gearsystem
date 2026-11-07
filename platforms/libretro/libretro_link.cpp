@@ -37,6 +37,8 @@ LibretroLink::LibretroLink(LibretroInstance* instances, s8* vertical_latch, s8* 
     m_dpad_horizontal_latch = horizontal_latch;
     m_save_path[0] = 0;
     m_has_rom_identity = false;
+    m_first = 0;
+    m_headless[0] = m_headless[1] = false;
     memset(m_rom_hash, 0, sizeof(m_rom_hash));
     memset(m_bootrom_hash, 0, sizeof(m_bootrom_hash));
     memset(&m_runtime, 0, sizeof(m_runtime));
@@ -156,18 +158,87 @@ void LibretroLink::RunFrame()
     unsigned lines = m_instances[0].core->GetCartridge()->IsPAL() ? GS_LINES_PER_FRAME_PAL : GS_LINES_PER_FRAME_NTSC;
     m_runtime.frame_cycle += lines * GS_CYCLES_PER_LINE;
 
+    // (Ties go to m_first: with the dual link both consoles run the same
+    // machines in the same order, whichever of them each one shows.)
+    const unsigned first = m_first;
+    const unsigned second = first ^ 1;
+
     while (Cycle(0) < m_runtime.frame_cycle || Cycle(1) < m_runtime.frame_cycle)
     {
-        unsigned index = Cycle(0) <= Cycle(1) ? 0 : 1;
+        unsigned index = Cycle(first) <= Cycle(second) ? first : second;
         unsigned int clocks;
         u8* frame_buffer = (u8*)m_instances[index].frame_buffer;
 
-        if (m_instances[index].core->RunCycle(frame_buffer, clocks))
+        if (m_instances[index].core->RunCycle(frame_buffer, clocks) && !m_headless[index])
             m_instances[index].core->RenderFrameBuffer(frame_buffer);
     }
 
     for (unsigned i = 0; i < 2; i++)
         m_instances[i].core->EndFrame(m_instances[i].audio_buffer, &m_instances[i].sample_count);
+}
+
+void LibretroLink::SetFirst(unsigned index)
+{
+    m_first = index & 1;
+}
+
+void LibretroLink::SetHeadless(unsigned index, bool headless)
+{
+    m_headless[index & 1] = headless;
+    m_instances[index & 1].core->SetHeadless(headless);
+}
+
+// One machine: its savestate (which holds the cartridge RAM) and its end of
+// the cable.
+bool LibretroLink::SaveMachine(GearsystemCore* core, std::vector<u8>& data)
+{
+    size_t core_size = 0;
+
+    if (!core->SaveState(NULL, core_size) || !core_size)
+        return false;
+
+    std::ostringstream cable;
+    core->SaveLinkCableState(cable);
+    const std::string cable_data = cable.str();
+
+    data.resize(sizeof(u32) + core_size + cable_data.size());
+    u32 size32 = (u32)core_size;
+    memcpy(&data[0], &size32, sizeof(size32));
+
+    if (!core->SaveState(&data[sizeof(u32)], core_size) || core_size != size32)
+        return false;
+
+    memcpy(&data[sizeof(u32) + core_size], cable_data.data(), cable_data.size());
+    return true;
+}
+
+bool LibretroLink::LoadMachine(GearsystemCore* core, const u8* data, size_t size)
+{
+    u32 core_size;
+
+    if (size < sizeof(u32))
+        return false;
+
+    memcpy(&core_size, data, sizeof(core_size));
+
+    if ((size_t)core_size + sizeof(u32) + sizeof(u64) > size)
+        return false;
+
+    const u8* cable = data + sizeof(u32) + core_size;
+    const size_t cable_size = size - sizeof(u32) - core_size;
+
+    // Input state loading rebases peripheral timestamps against this clock.
+    u64 master_clock;
+    memcpy(&master_clock, cable, sizeof(master_clock));
+    core->SetMasterClockCycles(master_clock);
+
+    if (!core->LoadState(data + sizeof(u32), core_size))
+        return false;
+
+    memory_input_stream stream((const char*)cable, cable_size);
+    core->LoadLinkCableState(stream);
+
+    return stream.good() && (size_t)stream.tellg() == cable_size;
 }
 
 void LibretroLink::Geometry(bool vertical, int selection, unsigned* width, unsigned* height)

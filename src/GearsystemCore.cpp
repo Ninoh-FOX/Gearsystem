@@ -404,6 +404,12 @@ void GearsystemCore::SetGlassesConfig(GlassesConfig config)
     m_GlassesConfig = config;
 }
 
+void GearsystemCore::SetHeadless(bool headless)
+{
+    m_pVideo->SetHeadless(headless);
+    m_pAudio->SetHeadless(headless);
+}
+
 u64 GearsystemCore::GetMasterClockCycles()
 {
     return m_master_clock_cycles;
