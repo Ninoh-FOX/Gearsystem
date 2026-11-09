@@ -336,7 +336,7 @@ LDFLAGS += $(LIBM)
 CFLAGS += $(PLATFORM_FLAGS)
 CXXFLAGS += $(PLATFORM_FLAGS)
 
-DEFAULT_LTO_PLATFORMS := unix% osx% ios% tvos% win%
+DEFAULT_LTO_PLATFORMS := unix% osx% ios% tvos% win% miyoomini
 LTO ?= $(if $(filter $(DEFAULT_LTO_PLATFORMS),$(platform)),1,0)
 
 DEBUG ?= 0
