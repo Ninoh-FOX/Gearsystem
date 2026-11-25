@@ -73,6 +73,7 @@ static bool game_loaded = false;
 // each console. Instance 0 is the player's, instance 1 the other console's.
 static bool dual_enabled = false;       // Core option, read at load
 static bool dual_linked = false;        // Both Game Gears on the cable now
+static s16 dual_last_audio[2];
 static unsigned dual_my_slot = 0;
 static bool dual_options_pending = false;
 static Cartridge::ForceConfiguration dual_config;
@@ -416,17 +417,25 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
     info->timing.sample_rate    = 44100.0;
 }
 
-// A frame that does not run (the dual link waits): the same picture again,
-// and silence.
-static void dual_idle_frame(void)
+// Repeat the picture. In play, hold the last stereo sample while waiting.
+static void dual_idle_frame(bool hold_audio)
 {
-    static s16 silence[2 * 1024];
+    static const s16 silence[2 * 1024] = { 0 };
+    static s16 hold[2 * 1024];
     struct retro_system_av_info info;
     retro_get_system_av_info(&info);
-    unsigned frames = (unsigned)(info.timing.sample_rate / info.timing.fps + 0.5);
+    const unsigned frames = MIN((unsigned)(info.timing.sample_rate / info.timing.fps + 0.5), 1024u);
 
+    if (hold_audio)
+    {
+        for (unsigned i = 0; i < frames; i++)
+        {
+            hold[2 * i] = dual_last_audio[0];
+            hold[2 * i + 1] = dual_last_audio[1];
+        }
+    }
     video_cb(NULL, current_screen_width, current_screen_height, current_screen_width * sizeof(u16));
-    audio_batch_cb(silence, MIN(frames, (unsigned)(sizeof(silence) / sizeof(silence[0]) / 2)));
+    audio_batch_cb(hold_audio ? hold : silence, frames);
 }
 
 // The player's buttons, as they travel to the other console.
@@ -491,7 +500,7 @@ void retro_run(void)
 
     if (dual_setting_up())
     {
-        dual_idle_frame();
+        dual_idle_frame(false);
         return;
     }
 
@@ -500,7 +509,7 @@ void retro_run(void)
         input_poll_cb();
         if (dual_frame_begin(dual_local_keys()) != DUAL_FRAME_RUN || !dual_linked)
         {
-            dual_idle_frame();
+            dual_idle_frame(dual_linked);
             return;
         }
         for (unsigned i = 0; i < instance_count; i++)
@@ -543,7 +552,15 @@ void retro_run(void)
 
     video_cb(video, current_screen_width, current_screen_height, current_screen_width * sizeof(u16));
     if (samples > 0)
-        audio_batch_cb(audio, samples / 2);
+    {
+        const unsigned frames = samples / 2;
+        if (dual_linked && frames)
+        {
+            dual_last_audio[0] = audio[2 * frames - 2];
+            dual_last_audio[1] = audio[2 * frames - 1];
+        }
+        audio_batch_cb(audio, frames);
+    }
 }
 
 static bool load_rom(GearsystemCore* target, const struct retro_game_info* info)
@@ -1880,6 +1897,7 @@ static bool dual_hook_link(unsigned my_slot, const uint8_t* own, size_t own_size
     link_cable->SetFirst(my_slot == 0 ? 0 : 1);
     link_cable->SetHeadless(1, true);
     link_cable->Reset();
+    dual_last_audio[0] = dual_last_audio[1] = 0;
     dual_linked = true;
     for (unsigned i = 0; i < 2; i++)
         instances[i].sample_count = 0;

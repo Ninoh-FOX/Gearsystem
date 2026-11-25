@@ -10,8 +10,10 @@ include $(CORE_DIR)/Makefile.common
 
 COREFLAGS := -DHAVE_STDINT_H -DHAVE_INTTYPES_H -D__LIBRETRO__ -DGS_DISABLE_DISASSEMBLER -DGS_DISABLE_VGMRECORDER $(INCLUDES)
 
-GIT_VERSION ?= " $(shell git -c safe.directory="$(abspath $(ROOT_DIR))" describe --abbrev=7 --dirty --always --tags || echo unknown)"
-ifneq ($(GIT_VERSION)," unknown")
+# (No leading space: the version goes into the netpacket core version, which
+# must be the same as the one of the Makefile builds for the consoles to link.)
+GIT_VERSION ?= "$(shell git -c safe.directory="$(abspath $(ROOT_DIR))" describe --abbrev=7 --dirty --always --tags || echo unknown)"
+ifneq ($(GIT_VERSION),"unknown")
    COREFLAGS += -DEMULATOR_BUILD=\"$(GIT_VERSION)\"
 endif
 
